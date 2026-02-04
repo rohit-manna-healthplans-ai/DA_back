@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flask import Blueprint, jsonify, request, g
@@ -148,8 +148,8 @@ def read_bucket(doc: Dict[str, Any], key: str, day: str):
 
 def read_archives(col, mac_id: str, key: str, day: str):
     # Supports older archives format if you used it previously
-    # IMPORTANT: escape prefix because `|` is regex alternation.
     prefix = f"{mac_id}|archive|{key}|{day}|"
+    # IMPORTANT: escape regex metacharacters ("|" etc.) so we don't match unrelated docs.
     safe_prefix = re.escape(prefix)
     return col.find({"_id": {"$regex": f"^{safe_prefix}"}})
 
@@ -165,6 +165,11 @@ def iter_log_events(mac_ids: List[str], start: datetime, end: datetime) -> Itera
                 events.extend(read_bucket(a, "logs", day))
             for e in events:
                 if isinstance(e, dict):
+                    # Defensive: some deployments had mixed user_mac_id events inside the wrong doc.
+                    # Keep overview KPIs correct by filtering to the owning mac when present.
+                    um = e.get("user_mac_id")
+                    if um and mac and str(um) != str(mac):
+                        continue
                     yield e
 
 
@@ -179,28 +184,54 @@ def iter_screenshot_events(mac_ids: List[str], start: datetime, end: datetime) -
                 items.extend(read_bucket(a, "screenshots", day))
             for s in items:
                 if isinstance(s, dict):
+                    um = s.get("user_mac_id")
+                    if um and mac and str(um) != str(mac):
+                        continue
                     yield s
 
 
-def compute_active_minutes(events_by_user: Dict[str, List[datetime]], gap_minutes: int = 5) -> int:
+
+def _sessionize_seconds(times: List[datetime], gap_minutes: int) -> int:
+    """Convert event timestamps into active seconds using sessionization.
+
+    Session rules:
+    - Sort timestamps.
+    - A session continues while consecutive gaps <= gap_minutes.
+    - Each session contributes at least 60 seconds so sparse activity isn't shown as 0.
     """
-    Heuristic active time:
-    - For each user, sort timestamps
-    - Sum time differences where gap <= gap_minutes
-    - Add a small minimum per event (1 minute) to avoid 0 for sparse sessions
+    if not times:
+        return 0
+    times = sorted(times)
+    gap = gap_minutes * 60
+
+    total = 0
+    session_start = times[0]
+    prev = times[0]
+
+    for t in times[1:]:
+        dt = (t - prev).total_seconds()
+        if 0 <= dt <= gap:
+            prev = t
+            continue
+        # close session
+        total += max(60, int((prev - session_start).total_seconds()))
+        session_start = t
+        prev = t
+
+    # close last session
+    total += max(60, int((prev - session_start).total_seconds()))
+    return total
+
+
+def compute_active_minutes(events_by_user: Dict[str, List[datetime]], gap_minutes: int = 5) -> int:
+    """Compute total active minutes for the selected scope.
+
+    Fix: previously we added 1 minute per event + short gaps, which inflated totals.
+    Now we sessionize event timestamps and sum session durations.
     """
     total_seconds = 0
     for _mac, times in events_by_user.items():
-        if not times:
-            continue
-        times.sort()
-        # base: 1 minute per event (very conservative)
-        total_seconds += len(times) * 60
-
-        for i in range(1, len(times)):
-            dt = (times[i] - times[i - 1]).total_seconds()
-            if 0 < dt <= gap_minutes * 60:
-                total_seconds += dt
+        total_seconds += _sessionize_seconds(times, gap_minutes=gap_minutes)
     return int(total_seconds // 60)
 
 
@@ -427,107 +458,101 @@ def dashboard():
             if d in per_day_active_seconds:
                 times_by_user_day[mac][d].append(dt)
 
+    
     for mac, days in times_by_user_day.items():
         for d, times in days.items():
-            times.sort()
-            # base: 1 min per event
-            secs = len(times) * 60
-            for i in range(1, len(times)):
-                delta = (times[i] - times[i - 1]).total_seconds()
-                if 0 < delta <= 5 * 60:
-                    secs += delta
-            per_day_active_seconds[d] += secs
+            per_day_active_seconds[d] += _sessionize_seconds(times, gap_minutes=5)
 
-    activity_minutes_by_day = [int(per_day_active_seconds[d] // 60) for d in labels_days]
+        activity_minutes_by_day = [int(per_day_active_seconds[d] // 60) for d in labels_days]
 
-    # KPIs
-    total_apps = len([k for k, v in apps_counter.items() if v > 0 and k != "(unknown)"]) or len(apps_counter)
-    most_used_app = apps_counter.most_common(1)[0][0] if apps_counter else None
-    top_category = cat_counter.most_common(1)[0][0] if cat_counter else None
-    last_updated = last_updated_dt.isoformat() if last_updated_dt else None
+        # KPIs
+        total_apps = len([k for k, v in apps_counter.items() if v > 0 and k != "(unknown)"]) or len(apps_counter)
+        most_used_app = apps_counter.most_common(1)[0][0] if apps_counter else None
+        top_category = cat_counter.most_common(1)[0][0] if cat_counter else None
+        last_updated = last_updated_dt.isoformat() if last_updated_dt else None
 
-    # Charts:
-    # Top apps (bar)
-    top_apps_items = [{"name": k, "count": v} for k, v in apps_counter.most_common(10)]
+        # Charts:
+        # Top apps (bar)
+        top_apps_items = [{"name": k, "count": v} for k, v in apps_counter.most_common(10)]
 
-    # Category distribution (donut) + top categories (bar)
-    cat_items = [{"name": k, "count": v} for k, v in cat_counter.most_common(30)]
-    top_categories_items = [{"name": k, "count": v} for k, v in cat_counter.most_common(10)]
+        # Category distribution (donut) + top categories (bar)
+        cat_items = [{"name": k, "count": v} for k, v in cat_counter.most_common(30)]
+        top_categories_items = [{"name": k, "count": v} for k, v in cat_counter.most_common(10)]
 
-    # Apps trend stacked area: pick top 5 apps overall
-    top5_apps = [k for k, _v in apps_counter.most_common(5)]
-    apps_trend = {}
-    for d in labels_days:
-        row = {app: int(app_counts_by_day[d].get(app, 0)) for app in top5_apps}
-        apps_trend[d] = row
+        # Apps trend stacked area: pick top 5 apps overall
+        top5_apps = [k for k, _v in apps_counter.most_common(5)]
+        apps_trend = {}
+        for d in labels_days:
+            row = {app: int(app_counts_by_day[d].get(app, 0)) for app in top5_apps}
+            apps_trend[d] = row
 
-    # Active time by weekday (bar)
-    active_by_wd = Counter()
-    for d in labels_days:
-        dt = parse_ymd(d)
-        if not dt:
-            continue
-        wd = dt.strftime("%a")
-        wd = {"Mon": "Mon", "Tue": "Tue", "Wed": "Wed", "Thu": "Thu", "Fri": "Fri", "Sat": "Sat", "Sun": "Sun"}.get(wd, wd)
-        active_by_wd[wd] += int(per_day_active_seconds[d] // 60)
+        # Active time by weekday (bar)
+        active_by_wd = Counter()
+        for d in labels_days:
+            dt = parse_ymd(d)
+            if not dt:
+                continue
+            wd = dt.strftime("%a")
+            wd = {"Mon": "Mon", "Tue": "Tue", "Wed": "Wed", "Thu": "Thu", "Fri": "Fri", "Sat": "Sat", "Sun": "Sun"}.get(wd, wd)
+            active_by_wd[wd] += int(per_day_active_seconds[d] // 60)
 
-    # Scope label
-    role = (identity or {}).get("role_key")
-    dept = (identity or {}).get("department")
-    if role == ROLE_C_SUITE:
-        dep_override = request.args.get("department")
-        scope_label = f"All departments" + (f" (filtered: {dep_override})" if dep_override else "")
-    elif role == ROLE_DEPT_HEAD:
-        scope_label = f"Department: {dept}" if dept else "Department scope"
-    else:
-        scope_label = "Scoped"
+        # Scope label
+        role = (identity or {}).get("role_key")
+        dept = (identity or {}).get("department")
+        if role == ROLE_C_SUITE:
+            dep_override = request.args.get("department")
+            scope_label = f"All departments" + (f" (filtered: {dep_override})" if dep_override else "")
+        elif role == ROLE_DEPT_HEAD:
+            scope_label = f"Department: {dept}" if dept else "Department scope"
+        else:
+            scope_label = "Scoped"
 
-    wh = {k: int(v) for k, v in week_hour.items()}
+        wh = {k: int(v) for k, v in week_hour.items()}
 
     return ok(
-        {
-            "range": {"from": from_s, "to": to_s},
-            "scope": {"label": scope_label, "role_key": role, "department": dept},
-            "kpis": {
-                "unique_users": len(set(mac_ids)),
-                "logs": logs_count,
-                "screenshots": shots_count,
-                "total_apps": int(total_apps or 0),
-                "most_used_app": most_used_app,
-                "top_category": top_category,
-                "last_updated": last_updated,
-                "total_active_minutes": int(total_active_minutes or 0),
-            },
-            "charts": {
-                # 1) Activity Over Time (Line)
-                "activity_over_time": {
-                    "labels": labels_days,
-                    "series": [{"name": "Active Minutes", "data": activity_minutes_by_day}],
+            {
+                "range": {"from": from_s, "to": to_s},
+                "scope": {"label": scope_label, "role_key": role, "department": dept},
+                "kpis": {
+                    "unique_users": len(set(mac_ids)),
+                    "logs": logs_count,
+                    "screenshots": shots_count,
+                    "total_apps": int(total_apps or 0),
+                    "most_used_app": most_used_app,
+                    "top_category": top_category,
+                    "last_updated": last_updated,
+                    "total_active_minutes": int(total_active_minutes or 0),
                 },
-                # 2) Top Apps (Bar)
-                "top_apps": {"items": top_apps_items},
-                # 3) Hourly Heatmap (weekday x hour)
-                "hourly_heatmap": {"week_hour": wh},
-                # 4) Category Distribution (Donut)
-                "category_distribution": {"items": cat_items},
-                # 5) Top Categories (Bar)
-                "top_categories": {"items": top_categories_items},
-                # 6) Apps Trend (Stacked area: top 5 apps over time)
-                "apps_trend": {
-                    "labels": labels_days,
-                    "keys": top5_apps,
-                    "rows": [{"day": d, **apps_trend[d]} for d in labels_days],
+                "charts": {
+                    # 1) Activity Over Time (Line)
+                    "activity_over_time": {
+                        "labels": labels_days,
+                        "series": [{"name": "Active Minutes", "data": activity_minutes_by_day}],
+                    },
+                    # 2) Top Apps (Bar)
+                    "top_apps": {"items": top_apps_items},
+                    # 3) Hourly Heatmap (weekday x hour)
+                    "hourly_heatmap": {"week_hour": wh},
+                    # 4) Category Distribution (Donut)
+                    "category_distribution": {"items": cat_items},
+                    # 5) Top Categories (Bar)
+                    "top_categories": {"items": top_categories_items},
+                    # 6) Apps Trend (Stacked area: top 5 apps over time)
+                    "apps_trend": {
+                        "labels": labels_days,
+                        "keys": top5_apps,
+                        "rows": [{"day": d, **apps_trend[d]} for d in labels_days],
+                    },
+                    # 7) Active Time by Day of Week (Bar)
+                    "active_by_weekday": {
+                        "labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                        "data": [active_by_wd[wd] for wd in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]],
+                    },
+                    # 8) Screenshots Over Time (Line/Bar)
+                    "screenshots_over_time": {
+                        "labels": labels_days,
+                        "series": [{"name": "Screenshots", "data": [shots_by_day[d] for d in labels_days]}],
+                    },
                 },
-                # 7) Active Time by Day of Week (Bar)
-                "active_by_weekday": {
-                    "labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-                    "data": [active_by_wd[wd] for wd in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]],
-                },
-                # 8) Screenshots Over Time (Line/Bar)
-                "screenshots_over_time": {
-                    "labels": labels_days,
-                    "series": [{"name": "Screenshots", "data": [shots_by_day[d] for d in labels_days]}],
-                },
-            },
-        }
-    )
+            }
+        )

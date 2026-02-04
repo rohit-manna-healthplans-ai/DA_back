@@ -10,11 +10,50 @@ from db import ensure_indexes, users, logs, screenshots
 from rbac import require_dashboard_access, ROLE_C_SUITE, ROLE_DEPT_HEAD
 
 
+
+
+
+# UPDATED data_api.py
+# Adds consistent from/to date filtering for Overview KPIs
+
+from datetime import datetime
+import re
+
+
+
+
 data_api = Blueprint("data_api", __name__)
 
 
 def ok(data=None, status: int = 200):
     return jsonify({"ok": True, "data": data}), status
+
+
+
+def parse_date_range(from_date, to_date):
+    query = {}
+    if from_date and to_date:
+        query["ts"] = {
+            "$gte": datetime.fromisoformat(from_date),
+            "$lte": datetime.fromisoformat(to_date),
+        }
+    return query
+
+def get_overview_data(col, user_mac_ids, from_date=None, to_date=None):
+    base_query = parse_date_range(from_date, to_date)
+    base_query["user_mac_id"] = {"$in": user_mac_ids}
+
+    logs = col["logs"].find(base_query)
+    screenshots = col["screenshots"].find(base_query)
+
+    total_logs = sum(len(v) for d in logs for v in d.get("logs", {}).values())
+    total_screenshots = sum(len(v) for d in screenshots for v in d.get("screenshots", {}).values())
+
+    return {
+        "total_logs": total_logs,
+        "total_screenshots": total_screenshots,
+    }
+
 
 
 def parse_ymd(s: str):

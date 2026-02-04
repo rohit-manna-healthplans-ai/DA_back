@@ -38,6 +38,23 @@ def ok(data=None, status: int = 200):
     return jsonify({"ok": True, "data": data}), status
 
 
+
+def parse_dates():
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    return from_date, to_date
+
+def get_user_overview(service, user_ids):
+    from_date, to_date = parse_dates()
+    data = service.get_overview_data(
+        user_ids=user_ids,
+        from_date=from_date,
+        to_date=to_date
+    )
+    return jsonify(data)
+
+
+
 def err(msg: str, status: int = 400):
     return jsonify({"ok": False, "error": msg}), status
 
