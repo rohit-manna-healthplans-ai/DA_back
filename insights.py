@@ -457,57 +457,55 @@ def dashboard():
             d = dt.strftime("%Y-%m-%d")
             if d in per_day_active_seconds:
                 times_by_user_day[mac][d].append(dt)
-
-    
     for mac, days in times_by_user_day.items():
         for d, times in days.items():
             per_day_active_seconds[d] += _sessionize_seconds(times, gap_minutes=5)
 
-        activity_minutes_by_day = [int(per_day_active_seconds[d] // 60) for d in labels_days]
+    activity_minutes_by_day = [int(per_day_active_seconds[d] // 60) for d in labels_days]
 
-        # KPIs
-        total_apps = len([k for k, v in apps_counter.items() if v > 0 and k != "(unknown)"]) or len(apps_counter)
-        most_used_app = apps_counter.most_common(1)[0][0] if apps_counter else None
-        top_category = cat_counter.most_common(1)[0][0] if cat_counter else None
-        last_updated = last_updated_dt.isoformat() if last_updated_dt else None
+    # KPIs
+    total_apps = len([k for k, v in apps_counter.items() if v > 0 and k != "(unknown)"]) or len(apps_counter)
+    most_used_app = apps_counter.most_common(1)[0][0] if apps_counter else None
+    top_category = cat_counter.most_common(1)[0][0] if cat_counter else None
+    last_updated = last_updated_dt.isoformat() if last_updated_dt else None
 
-        # Charts:
-        # Top apps (bar)
-        top_apps_items = [{"name": k, "count": v} for k, v in apps_counter.most_common(10)]
+    # Charts:
+    # Top apps (bar)
+    top_apps_items = [{"name": k, "count": v} for k, v in apps_counter.most_common(10)]
 
-        # Category distribution (donut) + top categories (bar)
-        cat_items = [{"name": k, "count": v} for k, v in cat_counter.most_common(30)]
-        top_categories_items = [{"name": k, "count": v} for k, v in cat_counter.most_common(10)]
+    # Category distribution (donut) + top categories (bar)
+    cat_items = [{"name": k, "count": v} for k, v in cat_counter.most_common(30)]
+    top_categories_items = [{"name": k, "count": v} for k, v in cat_counter.most_common(10)]
 
-        # Apps trend stacked area: pick top 5 apps overall
-        top5_apps = [k for k, _v in apps_counter.most_common(5)]
-        apps_trend = {}
-        for d in labels_days:
-            row = {app: int(app_counts_by_day[d].get(app, 0)) for app in top5_apps}
-            apps_trend[d] = row
+    # Apps trend stacked area: pick top 5 apps overall
+    top5_apps = [k for k, _v in apps_counter.most_common(5)]
+    apps_trend = {}
+    for d in labels_days:
+        row = {app: int(app_counts_by_day[d].get(app, 0)) for app in top5_apps}
+        apps_trend[d] = row
 
-        # Active time by weekday (bar)
-        active_by_wd = Counter()
-        for d in labels_days:
-            dt = parse_ymd(d)
-            if not dt:
-                continue
-            wd = dt.strftime("%a")
-            wd = {"Mon": "Mon", "Tue": "Tue", "Wed": "Wed", "Thu": "Thu", "Fri": "Fri", "Sat": "Sat", "Sun": "Sun"}.get(wd, wd)
-            active_by_wd[wd] += int(per_day_active_seconds[d] // 60)
+    # Active time by weekday (bar)
+    active_by_wd = Counter()
+    for d in labels_days:
+        dt = parse_ymd(d)
+        if not dt:
+            continue
+        wd = dt.strftime("%a")
+        wd = {"Mon": "Mon", "Tue": "Tue", "Wed": "Wed", "Thu": "Thu", "Fri": "Fri", "Sat": "Sat", "Sun": "Sun"}.get(wd, wd)
+        active_by_wd[wd] += int(per_day_active_seconds[d] // 60)
 
-        # Scope label
-        role = (identity or {}).get("role_key")
-        dept = (identity or {}).get("department")
-        if role == ROLE_C_SUITE:
-            dep_override = request.args.get("department")
-            scope_label = f"All departments" + (f" (filtered: {dep_override})" if dep_override else "")
-        elif role == ROLE_DEPT_HEAD:
-            scope_label = f"Department: {dept}" if dept else "Department scope"
-        else:
-            scope_label = "Scoped"
+    # Scope label
+    role = (identity or {}).get("role_key")
+    dept = (identity or {}).get("department")
+    if role == ROLE_C_SUITE:
+        dep_override = request.args.get("department")
+        scope_label = f"All departments" + (f" (filtered: {dep_override})" if dep_override else "")
+    elif role == ROLE_DEPT_HEAD:
+        scope_label = f"Department: {dept}" if dept else "Department scope"
+    else:
+        scope_label = "Scoped"
 
-        wh = {k: int(v) for k, v in week_hour.items()}
+    wh = {k: int(v) for k, v in week_hour.items()}
 
     return ok(
             {
